@@ -267,6 +267,35 @@ EXTRACTION_EXAMPLES = [
 ]
 
 
+# ── Confidence filter ─────────────────────────────────────────────────────────
+
+_MIN_UNIQUE_TOKENS = 3  # extraction_text must have ≥3 unique tokens beyond type label
+
+
+def _filter_low_confidence(entities: list[ExtractedEntity]) -> list[ExtractedEntity]:
+    """
+    Drop entities whose extraction_text is too thin to be meaningful.
+
+    If the extraction_text has fewer than _MIN_UNIQUE_TOKENS unique tokens
+    after removing the entity type label words, the entity is almost
+    certainly noise (e.g. a bare brand name from a footer).
+    """
+    import re
+    kept, dropped = [], 0
+    for e in entities:
+        text = e.text.lower()
+        # Remove the entity type label words from the token set
+        label_words = set(e.entity_type.lower().replace("_", " ").split())
+        tokens = set(re.findall(r"\b[a-z]{2,}\b", text)) - label_words
+        if len(tokens) >= _MIN_UNIQUE_TOKENS:
+            kept.append(e)
+        else:
+            dropped += 1
+    if dropped:
+        logger.info(f"Confidence filter: dropped {dropped} thin entities")
+    return kept
+
+
 # ── Extractor class ───────────────────────────────────────────────────────────
 
 class SchoolDataExtractor:
@@ -342,6 +371,9 @@ class SchoolDataExtractor:
                         school_name=school_name,
                         domain=domain,
                     ))
+
+            # Drop entities with too-thin extraction text (noise filter)
+            result.entities = _filter_low_confidence(result.entities)
 
             logger.info(
                 f"Extracted {len(result.entities)} entities from {source_url[:60]}"

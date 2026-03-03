@@ -14,3 +14,4 @@ pytesseract
 Pillow
 sentence-transformers
 torch
+rapidfuzz

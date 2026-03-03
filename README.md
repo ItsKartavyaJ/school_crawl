@@ -42,7 +42,10 @@ python main.py --csv schools.csv
 # Skip Qdrant upload, just export files
 python main.py --url https://school-website.org --no-qdrant
 
-# Query the database
+# Resume from last completed step (if interrupted)
+python main.py --url https://school-website.org --resume
+
+# Query the database (hybrid dense+sparse search)
 python query.py "vendor contracts expiring soon"
 python query.py "roof problems" --type problem
 python query.py --list-schools
@@ -52,7 +55,16 @@ python query.py --list-schools
 
 See [arch.md](arch.md) for the full architecture doc — file-by-file breakdown, data flow, and known issues.
 
-**Pipeline:** Crawl → Extract (Gemini) → Chunk → Embed (BGE-large) → Upload (Qdrant) → Export (Excel/JSON)
+**Pipeline:** Crawl → Extract (Gemini) → Confidence Filter → Entity Resolution (rapidfuzz) → Chunk → Embed (BGE-large dense + sparse) → Upload (Qdrant hybrid RRF) → Export (Excel/JSON)
+
+**Key features:**
+- Hybrid dense+sparse search via Qdrant RRF fusion
+- Fuzzy vendor name canonicalisation (rapidfuzz)
+- Hybrid static/JS fetcher (static first, browser fallback for thin pages)
+- PDF table extraction to markdown
+- Step-level resume (`--resume` flag)
+- Token budget estimation before extraction
+- Confidence filter drops noise entities
 
 **Two Qdrant collections:**
 - `school_intel` — structured entities (vendors, budgets, projects, etc.)

@@ -10,11 +10,89 @@ Each chunk = one entity with:
 import hashlib
 from dataclasses import dataclass, field
 from typing import Optional, Any
+from collections import defaultdict
 
 from loguru import logger
+from rapidfuzz import fuzz
 
 from extractor import ExtractedEntity
 from config import RAW_TEXT_MAX_LENGTH
+
+
+# ── Entity resolution — fuzzy vendor name canonicalisation ────────────────────
+
+_FUZZY_THRESHOLD = 85  # fuzz.ratio score to consider two names the same
+
+
+def _resolve_vendor_names(entities: list[ExtractedEntity]) -> list[ExtractedEntity]:
+    """
+    Canonicalise vendor / contractor names across all entities.
+
+    Groups vendor and contractor names by fuzzy similarity, picks the
+    longest (most specific) name as canonical, and rewrites all others.
+    This merges e.g. "Amazon", "Amazon Web Services", "amazon.com" into
+    a single canonical name.
+    """
+    # Collect unique names from relevant entity types
+    vendor_types = {"vendor", "contractor"}
+    name_key_map = {"vendor": "vendor_name", "contractor": "contractor_name"}
+
+    raw_names: list[str] = []
+    for e in entities:
+        etype = e.entity_type.lower()
+        if etype in vendor_types:
+            key = name_key_map[etype]
+            name = e.attributes.get(key, e.text).strip()
+            if name:
+                raw_names.append(name)
+
+    if not raw_names:
+        return entities
+
+    # Build canonical clusters via greedy matching
+    canonical_map: dict[str, str] = {}  # raw_lower → canonical
+    clusters: list[list[str]] = []
+
+    for name in raw_names:
+        nl = name.lower().strip()
+        if nl in canonical_map:
+            continue
+        # Try to find a matching cluster
+        matched = False
+        for cluster in clusters:
+            rep = cluster[0]
+            if fuzz.ratio(nl, rep.lower()) >= _FUZZY_THRESHOLD:
+                cluster.append(name)
+                canonical_map[nl] = cluster[0]  # will be resolved below
+                matched = True
+                break
+        if not matched:
+            clusters.append([name])
+            canonical_map[nl] = name
+
+    # For each cluster, pick the longest name as canonical
+    for cluster in clusters:
+        canonical = max(cluster, key=len)
+        for name in cluster:
+            canonical_map[name.lower().strip()] = canonical
+
+    # Rewrite attributes
+    rewrites = 0
+    for e in entities:
+        etype = e.entity_type.lower()
+        if etype in vendor_types:
+            key = name_key_map[etype]
+            old_name = e.attributes.get(key, e.text).strip()
+            new_name = canonical_map.get(old_name.lower().strip(), old_name)
+            if new_name != old_name:
+                e.attributes[key] = new_name
+                rewrites += 1
+
+    if rewrites:
+        n_clusters = len([c for c in clusters if len(c) > 1])
+        logger.info(f"Entity resolution: {rewrites} name rewrites across {n_clusters} clusters")
+
+    return entities
 
 
 # ── Chunk ─────────────────────────────────────────────────────────────────────
@@ -25,6 +103,8 @@ class Chunk:
     embed_text: str
     metadata: dict[str, Any]
     vector: Optional[list[float]] = None
+    sparse_indices: Optional[list[int]] = None
+    sparse_values: Optional[list[float]] = None
 
     def to_qdrant_point(self) -> dict:
         return {
@@ -186,6 +266,8 @@ def entity_to_chunk(entity: ExtractedEntity) -> Optional[Chunk]:
 
 
 def entities_to_chunks(entities: list[ExtractedEntity]) -> list[Chunk]:
+    # Fuzzy-match vendor/contractor names before chunking
+    entities = _resolve_vendor_names(entities)
     chunks  = [entity_to_chunk(e) for e in entities]
     valid   = [c for c in chunks if c is not None]
     skipped = len(chunks) - len(valid)

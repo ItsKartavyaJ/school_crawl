@@ -45,8 +45,17 @@ def _ocr_pdf(path: str, filename: str) -> Optional[PDFDocument]:
         from PIL import Image
         import pytesseract
         import io
+        import platform
+        import shutil
 
-        pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        # Platform-aware Tesseract path
+        if platform.system() == "Windows":
+            default_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+            if Path(default_path).exists():
+                pytesseract.pytesseract.tesseract_cmd = default_path
+        elif not shutil.which("tesseract"):
+            logger.warning("Tesseract not found on PATH — OCR unavailable")
+            return None
 
         doc = fitz.open(path)
         pages = []
@@ -107,10 +116,29 @@ def extract_pdf(path: str) -> Optional[PDFDocument]:
         pages = []
         with pdfplumber.open(path) as pdf:
             for i, page in enumerate(pdf.pages):
+                # --- Table extraction: intercept structured tables ---
+                table_text = ""
+                try:
+                    tables = page.extract_tables()
+                    for table in (tables or []):
+                        if table and len(table) > 1:  # header + at least 1 row
+                            # Convert table rows to markdown-style text
+                            header = [str(c or "").strip() for c in table[0]]
+                            rows = []
+                            for row in table[1:]:
+                                cells = [str(c or "").strip() for c in row]
+                                rows.append(" | ".join(cells))
+                            table_text += " | ".join(header) + "\n"
+                            table_text += " | ".join(["-" * len(h) for h in header]) + "\n"
+                            table_text += "\n".join(rows) + "\n\n"
+                except Exception:
+                    pass  # table extraction failed, fall through to text
+
                 text = page.extract_text() or ""
-                if text.strip():
-                    pages.append(PDFPage(page_number=i + 1, text=text.strip(),
-                                         char_count=len(text)))
+                combined = (text.strip() + "\n\n" + table_text.strip()).strip()
+                if combined:
+                    pages.append(PDFPage(page_number=i + 1, text=combined,
+                                         char_count=len(combined)))
         if pages:
             logger.info(f"Extracted {len(pages)} pages from {filename} via pdfplumber")
             return PDFDocument(path=path, filename=filename, pages=pages, total_pages=len(pages))

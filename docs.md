@@ -4,12 +4,14 @@
 This pipeline crawls school websites, extracts structured entities, embeds them, and optionally uploads results to Qdrant for semantic search.
 
 Main flow:
-1. Discover sitemap and crawl selected pages/PDFs
+1. Discover sitemap and crawl selected pages/PDFs (hybrid static/JS fetcher)
 2. Extract entities from web + PDF text (parallelized with ThreadPoolExecutor)
-3. Convert entities into chunks (deduplicated via SHA256 hashes)
-4. Generate embeddings (batched API calls with retry)
-5. Upload to Qdrant (optional)
-6. Export Excel + JSON files
+3. Filter out low-confidence entities (< 3 unique tokens)
+4. Resolve vendor/contractor names via fuzzy matching (rapidfuzz)
+5. Convert entities into chunks (deduplicated via SHA256 hashes)
+6. Generate embeddings (dense + sparse vectors for hybrid search)
+7. Upload to Qdrant with hybrid search support (dense + sparse, RRF fusion)
+8. Export Excel + JSON files
 
 ---
 
@@ -20,8 +22,10 @@ Main flow:
   - Gemini API key
   - Qdrant URL + API key (only needed if uploading to Qdrant)
 - Optional for OCR of scanned PDFs:
-  - Tesseract OCR installed and on PATH
+  - Tesseract OCR installed (auto-detected via `shutil.which()` on Linux/Mac; falls back to `C:\Program Files\Tesseract-OCR\` on Windows)
   - `pytesseract` + `Pillow` Python packages (included in requirements.txt)
+- Optional for fuzzy entity resolution:
+  - `rapidfuzz` (included in requirements.txt)
 
 ---
 
@@ -65,6 +69,8 @@ All settings are in `.env` (see `.env.example` for defaults):
 | `MIN_PDF_TEXT_LENGTH` | `50` | Skip PDF pages with less text |
 | `RETRY_ATTEMPTS` | `3` | Max retries for API/network calls |
 | `RAW_TEXT_MAX_LENGTH` | `1000` | Truncation limit for stored raw text |
+| `USE_JS_RENDERING` | `false` | Hybrid static/JS mode: tries plain HTTP first, falls back to headless Chromium for thin pages |
+| `RESPECT_ROBOTS_TXT` | `true` | Obey robots.txt rules for sitemap URL filtering |
 
 ---
 
@@ -96,6 +102,13 @@ python main.py --csv schools.csv --no-qdrant
 python main.py --url "https://example-school.edu" --crawl-dir ".\output\checkpoints"
 ```
 
+### Resume from last completed step
+If the pipeline was interrupted (e.g. during embedding or upload), resume without re-doing earlier steps:
+```powershell
+python main.py --url "https://example-school.edu" --resume
+```
+The pipeline tracks completed steps in `output/checkpoints/<school>_pipeline_state.json` and skips them on re-run.
+
 ### Show CLI help
 ```powershell
 python main.py --help
@@ -104,7 +117,7 @@ python main.py --help
 ---
 
 ## Querying Stored Data (Qdrant)
-After uploading, you can query via `query.py`.
+After uploading, you can query via `query.py`. Queries use **hybrid search** (dense semantic + sparse keyword matching via RRF fusion) for better recall.
 
 ```powershell
 python query.py "vendor contracts expiring soon"
@@ -129,19 +142,24 @@ Exports are written under the `output` directory.
 - JSON exports with full metadata
 - Downloaded PDFs in `output/pdfs/<domain>/`
 - Extraction checkpoints in `output/checkpoints/` (re-run safe)
+- Pipeline state files in `output/checkpoints/` (`*_pipeline_state.json` for `--resume`)
 
 ---
 
 ## Pipeline Timing
-Each pipeline run logs per-stage timing:
+Each pipeline run logs per-stage timing and a token budget estimate before extraction:
 ```
+  Estimated extraction tokens: ~125,000 (within budget)
   crawl          :   12.3s
   extraction     :   45.6s
   chunking       :    0.1s
   embedding      :    8.2s
   upload         :    3.1s
+  raw_upload     :    4.2s
   export         :    0.5s
-  TOTAL          :   69.8s
+  TOTAL          :   73.8s
+  Entities: 89 → Chunks: 41
+  Raw text chunks: 180
 ```
 
 You should see:
@@ -181,4 +199,7 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 # edit .env and set GEMINI_API_KEY
 python main.py --url "https://example-school.edu" --no-qdrant
+
+# If interrupted, resume:
+python main.py --url "https://example-school.edu" --no-qdrant --resume
 ```

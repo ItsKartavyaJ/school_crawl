@@ -107,15 +107,25 @@ class QdrantUploader:
             )
 
     def ensure_collection(self, vector_size: Optional[int] = None):
-        from qdrant_client.models import Distance, VectorParams
+        from qdrant_client.models import (
+            Distance, VectorParams,
+            SparseVectorParams, SparseIndexParams,
+        )
         size     = vector_size or get_embedding_dim()
         existing = [c.name for c in self.client.get_collections().collections]
         if self.collection not in existing:
             self.client.create_collection(
                 collection_name=self.collection,
-                vectors_config=VectorParams(size=size, distance=Distance.COSINE),
+                vectors_config={
+                    "dense": VectorParams(size=size, distance=Distance.COSINE),
+                },
+                sparse_vectors_config={
+                    "sparse": SparseVectorParams(
+                        index=SparseIndexParams(on_disk=False),
+                    ),
+                },
             )
-            logger.success(f"Created collection: '{self.collection}' (dim={size})")
+            logger.success(f"Created hybrid collection: '{self.collection}' (dim={size})")
         else:
             logger.info(f"Collection '{self.collection}' already exists")
 
@@ -133,11 +143,11 @@ class QdrantUploader:
 
     def upload(self, chunks: list[Chunk], batch_size: int = 64) -> int:
         """
-        Upsert chunks into Qdrant Cloud.
+        Upsert chunks into Qdrant Cloud with hybrid dense+sparse vectors.
         Safe to re-run — deterministic chunk IDs prevent duplicates.
         Each point payload = entity fields + full source tracing metadata.
         """
-        from qdrant_client.models import PointStruct
+        from qdrant_client.models import PointStruct, SparseVector
         import uuid
 
         if not chunks:
@@ -152,17 +162,22 @@ class QdrantUploader:
 
         def _to_uuid(hex_id: str) -> str:
             """Convert a hex chunk_id to a valid UUID for Qdrant."""
-            # Use first 32 hex chars of the SHA256 hash to form a UUID
             h = hex_id[:32].ljust(32, "0")
             return str(uuid.UUID(h))
 
         uploaded = 0
         for i in range(0, len(chunks), batch_size):
             batch  = chunks[i:i + batch_size]
-            points = [
-                PointStruct(
+            points = []
+            for c in batch:
+                vector_data: dict = {"dense": c.vector}
+                if c.sparse_indices and c.sparse_values:
+                    vector_data["sparse"] = SparseVector(
+                        indices=c.sparse_indices, values=c.sparse_values,
+                    )
+                points.append(PointStruct(
                     id=_to_uuid(c.chunk_id),
-                    vector=c.vector,
+                    vector=vector_data,
                     payload={
                         "page_content": c.embed_text,
                         "metadata": {
@@ -170,9 +185,7 @@ class QdrantUploader:
                             **_source_metadata(c),
                         },
                     },
-                )
-                for c in batch
-            ]
+                ))
             self.client.upsert(collection_name=self.collection, points=points)
             uploaded += len(batch)
             logger.info(f"Uploaded {uploaded}/{len(chunks)} chunks")
@@ -185,21 +198,59 @@ class QdrantUploader:
         query_vector: list[float],
         filter_conditions: Optional[dict] = None,
         limit: int = 10,
+        query_sparse: Optional[tuple[list[int], list[float]]] = None,
     ) -> list[dict]:
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        """
+        Hybrid search: dense + sparse vectors fused via RRF.
+        Falls back to dense-only if no sparse vector is provided.
+        """
+        from qdrant_client.models import (
+            Filter, FieldCondition, MatchValue,
+            Prefetch, Fusion, SparseVector,
+        )
+
         qdrant_filter = None
         if filter_conditions:
             qdrant_filter = Filter(must=[
                 FieldCondition(key=f"metadata.{k}", match=MatchValue(value=v))
                 for k, v in filter_conditions.items()
             ])
-        response = self.client.query_points(
-            collection_name=self.collection,
-            query=query_vector,
-            query_filter=qdrant_filter,
-            limit=limit,
-            with_payload=True,
-        )
+
+        # If we have sparse vectors, use hybrid prefetch + RRF fusion
+        if query_sparse and query_sparse[0]:
+            sparse_indices, sparse_values = query_sparse
+            prefetch = [
+                Prefetch(
+                    query=query_vector,
+                    using="dense",
+                    filter=qdrant_filter,
+                    limit=limit * 3,
+                ),
+                Prefetch(
+                    query=SparseVector(indices=sparse_indices, values=sparse_values),
+                    using="sparse",
+                    filter=qdrant_filter,
+                    limit=limit * 3,
+                ),
+            ]
+            response = self.client.query_points(
+                collection_name=self.collection,
+                prefetch=prefetch,
+                query=Fusion.RRF,
+                limit=limit,
+                with_payload=True,
+            )
+        else:
+            # Dense-only fallback (backward compatible)
+            response = self.client.query_points(
+                collection_name=self.collection,
+                query=query_vector,
+                using="dense",
+                query_filter=qdrant_filter,
+                limit=limit,
+                with_payload=True,
+            )
+
         return [{**h.payload, "_score": h.score, "_id": h.id} for h in response.points]
 
     def filter_only(self, filter_conditions: dict, limit: int = 100) -> list[dict]:
@@ -237,8 +288,8 @@ class RawTextUploader(QdrantUploader):
         super().__init__(url=url, api_key=api_key, collection=collection)
 
     def upload_raw(self, raw_chunks, batch_size: int = 64) -> int:
-        """Upload RawChunk objects to the raw text collection."""
-        from qdrant_client.models import PointStruct
+        """Upload RawChunk objects to the raw text collection with hybrid vectors."""
+        from qdrant_client.models import PointStruct, SparseVector
         import uuid
 
         if not raw_chunks:
@@ -258,17 +309,21 @@ class RawTextUploader(QdrantUploader):
         uploaded = 0
         for i in range(0, len(raw_chunks), batch_size):
             batch = raw_chunks[i:i + batch_size]
-            points = [
-                PointStruct(
+            points = []
+            for c in batch:
+                vector_data: dict = {"dense": c.vector}
+                if hasattr(c, "sparse_indices") and c.sparse_indices and c.sparse_values:
+                    vector_data["sparse"] = SparseVector(
+                        indices=c.sparse_indices, values=c.sparse_values,
+                    )
+                points.append(PointStruct(
                     id=_to_uuid(c.chunk_id),
-                    vector=c.vector,
+                    vector=vector_data,
                     payload={
                         "page_content": c.text,
                         "metadata": c.metadata,
                     },
-                )
-                for c in batch
-            ]
+                ))
             self.client.upsert(collection_name=self.collection, points=points)
             uploaded += len(batch)
             logger.info(f"Raw upload: {uploaded}/{len(raw_chunks)}")

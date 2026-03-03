@@ -1,5 +1,5 @@
 """
-query.py — Query the School Intelligence Database
+query.py — Query the School Intelligence Database (hybrid dense+sparse)
 
 Usage:
     python query.py "vendor contracts expiring soon"
@@ -11,7 +11,7 @@ Usage:
 import argparse
 from loguru import logger
 
-from embedder import get_embedder
+from embedder import get_embedder, SparseVectorizer
 from uploader import QdrantUploader
 
 
@@ -20,13 +20,18 @@ def search(query: str, entity_type: str = None, school_name: str = None, limit: 
     db       = QdrantUploader()
 
     [query_vector] = embedder.embed([query])
+    sparse_indices, sparse_values = SparseVectorizer.vectorize(query)
 
     filters = {}
     if entity_type:  filters["type"]        = entity_type
     if school_name:  filters["school_name"] = school_name
 
-    results = db.search(query_vector=query_vector,
-                        filter_conditions=filters or None, limit=limit)
+    results = db.search(
+        query_vector=query_vector,
+        filter_conditions=filters or None,
+        limit=limit,
+        query_sparse=(sparse_indices, sparse_values),
+    )
 
     print(f"\n{'='*60}")
     print(f"Query: '{query}'" + (f" | Filters: {filters}" if filters else ""))

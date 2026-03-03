@@ -28,6 +28,8 @@ class RawChunk:
     text: str                          # the text window
     metadata: dict[str, Any]
     vector: Optional[list[float]] = None
+    sparse_indices: Optional[list[int]] = None
+    sparse_values: Optional[list[float]] = None
 
 
 # ── Sliding-window splitter ──────────────────────────────────────────────────
