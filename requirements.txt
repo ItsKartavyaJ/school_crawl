@@ -1,0 +1,16 @@
+scrapling[all]
+langextract
+google-generativeai
+qdrant-client
+pymupdf
+pdfplumber
+pandas
+openpyxl
+python-dotenv
+loguru
+tqdm
+tenacity
+pytesseract
+Pillow
+sentence-transformers
+torch
