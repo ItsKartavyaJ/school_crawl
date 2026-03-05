@@ -13,6 +13,7 @@ Each extraction is grounded to its exact source location in the document.
 """
 
 import json
+import re
 import textwrap
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -53,6 +54,19 @@ class ExtractionResult:
     entities: list[ExtractedEntity] = field(default_factory=list)
 
 
+def _has_meaningful_content(text: str, min_unique_tokens: int = 12) -> bool:
+    """
+    Fast lexical gate before calling LangExtract.
+
+    Some pages have long but low-signal text (menus/chrome/repeated labels),
+    which can trigger empty-token alignment failures in LangExtract.
+    """
+    tokens = re.findall(r"\b[a-zA-Z][a-zA-Z0-9]{1,}\b", text)
+    if not tokens:
+        return False
+    return len(set(t.lower() for t in tokens)) >= min_unique_tokens
+
+
 # ── LangExtract prompt & examples ────────────────────────────────────────────
 
 EXTRACTION_PROMPT = textwrap.dedent("""\
@@ -60,65 +74,65 @@ EXTRACTION_PROMPT = textwrap.dedent("""\
     websites, board meeting documents, financial reports, and procurement pages.
 
     IMPORTANT RULES:
-    - Extract ONLY meaningful entities with real information.  Do NOT extract
-      brand names that appear in navigation bars, footers, cookie banners, 
-      or boilerplate website chrome (e.g. "Powered by SchoolPointe").
-    - For VENDOR entities: only extract if there is evidence the school USES,
-      PAYS, or CONTRACTS with the company.  A mere mention or link is not enough.
-      Include the FULL surrounding context as extraction_text so we capture
-      what service is provided and any contract/cost details.
-    - When a vendor is mentioned with its service description, ALWAYS fill in
-      service_type with what the vendor does for the school.
-    - Prefer extracting LONGER extraction_text passages (2-4 sentences) that
-      include context, rather than just the entity name alone.
-    - Leave attribute values as empty string "" only when the information is
-      truly not present in the source text.
-    - Do NOT invent or hallucinate information.  Use exact text from the source.
+    - Extract only meaningful entities with real information.
+    - Do not extract brands from navigation, footer credits, cookie banners,
+      CMS templates, or "Powered by" text.
+    - Do not hallucinate. Use only source-grounded text.
+    - If no valid entities exist, return an empty extraction list.
+    - Extract entities in order of appearance.
+    - Avoid duplicates and near-duplicates from the same source text.
 
-    Entity types to extract:
+    STRICT OUTPUT RULES:
+    - extraction_class MUST be one of:
+      vendor, budget, project, problem, board_member, contractor
+    - extraction_text should be 1-4 source-grounded sentences with context.
+      Do not output only a bare name unless the source itself is that short.
+    - Keep numeric/currency/date values as seen in source text where possible.
+    - Use empty string "" for missing attributes. Do not invent values.
 
-    1. VENDOR — a company, platform, or service provider the school actively
-       uses, pays, or has contracted with.
+    ENTITY TYPES:
+    1. vendor
+       Definition: A company/platform/service provider the school clearly uses,
+       pays, contracts, or procures.
+       Required evidence: relationship verbs like uses, contracted, approved,
+       purchased, paid, invoice, agreement, renewal.
        Attributes: vendor_name, service_type, contract_value, expiry_date, status
-       Examples of service_type: "student information system", "learning management
-       system", "food service provider", "IT support", "curriculum provider",
-       "assessment platform", "fundraising platform", "transportation",
-       "custodial services", "consulting", "professional development"
 
-    2. BUDGET — any budget allocation, financial figure, grant, revenue, or
-       expenditure mentioned with a dollar amount or percentage.
+    2. budget
+       Definition: Budget allocations, grants, revenue/expenditure figures, or
+       financial approvals with amount/percent context.
        Attributes: amount, currency, category, period, funding_source, status
 
-    3. PROJECT — any capital improvement, construction, renovation, technology
-       rollout, or operational initiative with a defined scope.
+    3. project
+       Definition: Capital works, renovation, construction, IT rollout, or other
+       scoped initiative with objective/timeline/value details.
        Attributes: project_name, description, value, timeline, status, vendor
 
-    4. PROBLEM — any issue, complaint, risk, concern, audit finding, or
-       deficiency raised in the document.
+    4. problem
+       Definition: Issues, risks, complaints, findings, deficiencies.
        Attributes: description, category, severity, date_mentioned, resolution
 
-    5. BOARD_MEMBER — any named individual serving on the board of trustees,
-       school board, governing body, or in a leadership/governance role.
+    5. board_member
+       Definition: Named trustees/governance/board members and officers.
        Attributes: name, role, term_start, term_end
 
-    6. CONTRACTOR — any construction company, trades firm, or specialist
-       contractor hired for a specific project or maintenance work.
+    6. contractor
+       Definition: Construction/trades/specialist contractors hired for projects.
        Attributes: contractor_name, trade, project, contract_value, expiry_date
 
-    SKIP these (do NOT extract):
-    - Navigation menu items, page titles, breadcrumbs
-    - Generic website features ("Login", "Contact Us", "Search")
-    - Social media links or sharing buttons
-    - Cookie consent / privacy policy boilerplate
-    - Vendor names that only appear in footer credits or "Powered by" text
-    - Duplicate mentions of the same entity on the same page
-
-    Extract entities in order of appearance.  For each entity, include enough
-    surrounding text in extraction_text to understand the CONTEXT — why is this
-    vendor/budget/project mentioned?  What is its relationship to the school?
+    SKIP (DO NOT EXTRACT):
+    - menu labels, breadcrumbs, generic CTA text
+    - social links/share widgets
+    - privacy/cookie/legal boilerplate
+    - "powered by" vendors and web agency credits
+    - contact-directory names without governance/project/contract context
 """)
 
 EXTRACTION_EXAMPLES = [
+    {
+        "text": "Powered by SchoolPointe. Follow us on Facebook. Login | Contact Us | Calendar.",
+        "extractions": []
+    },
     {
         "text": "The board approved a contract with Oracle New Zealand Ltd for student management software valued at $48,500 + GST, expiring 30 June 2026.",
         "extractions": [
@@ -143,7 +157,7 @@ EXTRACTION_EXAMPLES = [
                 "extraction_text": "A.C.E. Academy uses Google Workspace for Education to support classroom learning, assignments, communication with teachers, and development of 21st-century digital skills. This platform includes tools such as Gmail, Google Docs, and Google Classroom.",
                 "attributes": {
                     "vendor_name": "Google",
-                    "service_type": "Google Workspace for Education — classroom learning platform including Gmail, Google Docs, Google Classroom for assignments, communication, and digital skills",
+                    "service_type": "Google Workspace for Education - classroom learning platform including Gmail, Google Docs, Google Classroom for assignments, communication, and digital skills",
                     "contract_value": "",
                     "expiry_date": "",
                     "status": "active",
@@ -159,7 +173,7 @@ EXTRACTION_EXAMPLES = [
                 "extraction_text": "Infinite Campus is the student information system used for enrollment, attendance, grades, and parent communication.",
                 "attributes": {
                     "vendor_name": "Infinite Campus",
-                    "service_type": "student information system — enrollment, attendance, grades, and parent communication",
+                    "service_type": "student information system - enrollment, attendance, grades, and parent communication",
                     "contract_value": "",
                     "expiry_date": "",
                     "status": "active",
@@ -172,10 +186,10 @@ EXTRACTION_EXAMPLES = [
         "extractions": [
             {
                 "extraction_class": "budget",
-                "extraction_text": "Capital works budget of $350,000 allocated from Ministry of Education funding for roof replacement at Block B.",
+                "extraction_text": "Motion carried: Capital works budget of $350,000 allocated from Ministry of Education funding for roof replacement at Block B.",
                 "attributes": {
                     "amount": "350000",
-                    "currency": "USD",
+                    "currency": "",
                     "category": "capital works",
                     "period": "",
                     "funding_source": "Ministry of Education",
@@ -184,7 +198,7 @@ EXTRACTION_EXAMPLES = [
             },
             {
                 "extraction_class": "project",
-                "extraction_text": "roof replacement at Block B, budget of $350,000 allocated from Ministry of Education funding",
+                "extraction_text": "$350,000 allocated from Ministry of Education funding for roof replacement at Block B.",
                 "attributes": {
                     "project_name": "Block B Roof Replacement",
                     "description": "Roof replacement at Block B",
@@ -296,6 +310,30 @@ def _filter_low_confidence(entities: list[ExtractedEntity]) -> list[ExtractedEnt
     return kept
 
 
+def _filter_empty_attributes(entities: list[ExtractedEntity]) -> list[ExtractedEntity]:
+    """
+    Drop entities whose attributes are all empty (no meaningful data).
+    
+    An entity with all empty attribute values is noise - e.g., a vendor
+    with no name, service_type, contract_value, etc.
+    """
+    kept, dropped = [], 0
+    for e in entities:
+        attrs = e.attributes or {}
+        # Check if any attribute has a non-empty value
+        has_data = any(
+            v is not None and str(v).strip() not in ("", "N/A", "null", "None")
+            for v in attrs.values()
+        )
+        if has_data:
+            kept.append(e)
+        else:
+            dropped += 1
+    if dropped:
+        logger.info(f"Empty attribute filter: dropped {dropped} entities with no data")
+    return kept
+
+
 # ── Extractor class ───────────────────────────────────────────────────────────
 
 class SchoolDataExtractor:
@@ -346,7 +384,16 @@ class SchoolDataExtractor:
     ) -> ExtractionResult:
         """Run LangExtract on a block of text and return structured entities."""
 
-        if not text or len(text.strip()) < 100:
+        if not text:
+            return ExtractionResult(source_url=source_url, source_type=source_type)
+
+        text = " ".join(text.split())
+        if len(text) < 100:
+            return ExtractionResult(source_url=source_url, source_type=source_type)
+
+        # Skip low-signal text blocks to avoid empty-token extractor failures.
+        if not _has_meaningful_content(text):
+            logger.debug(f"Skipped low-signal text for extraction: {source_url[:80]}")
             return ExtractionResult(source_url=source_url, source_type=source_type)
 
         result = ExtractionResult(source_url=source_url, source_type=source_type)
@@ -361,10 +408,14 @@ class SchoolDataExtractor:
 
             if hasattr(extraction_result, "extractions"):
                 for ext in extraction_result.extractions:
+                    ext_text = (getattr(ext, "extraction_text", "") or "").strip()
+                    ext_class = (getattr(ext, "extraction_class", "") or "").strip()
+                    if not ext_text or not ext_class:
+                        continue
                     result.entities.append(ExtractedEntity(
-                        entity_type=ext.extraction_class,
-                        text=ext.extraction_text,
-                        attributes=ext.attributes or {},
+                        entity_type=ext_class,
+                        text=ext_text,
+                        attributes=getattr(ext, "attributes", None) or {},
                         source_url=source_url,
                         source_type=source_type,
                         source_page=source_page,
@@ -375,13 +426,23 @@ class SchoolDataExtractor:
             # Drop entities with too-thin extraction text (noise filter)
             result.entities = _filter_low_confidence(result.entities)
 
+            # Drop entities with all-empty attributes (no meaningful data)
+            result.entities = _filter_empty_attributes(result.entities)
+
             logger.info(
                 f"Extracted {len(result.entities)} entities from {source_url[:60]}"
                 + (f" p.{source_page}" if source_page else "")
             )
 
         except Exception as e:
-            logger.error(f"LangExtract failed on {source_url}: {e}")
+            msg = str(e)
+            if "Source tokens and extraction tokens cannot be empty" in msg:
+                logger.debug(
+                    f"LangExtract skipped empty-token page: {source_url[:80]}"
+                    + (f" p.{source_page}" if source_page else "")
+                )
+            else:
+                logger.error(f"LangExtract failed on {source_url}: {e}")
 
         return result
 

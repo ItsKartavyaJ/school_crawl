@@ -7,11 +7,12 @@ Main flow:
 1. Discover sitemap and crawl selected pages/PDFs (hybrid static/JS fetcher)
 2. Extract entities from web + PDF text (parallelized with ThreadPoolExecutor)
 3. Filter out low-confidence entities (< 3 unique tokens)
-4. Resolve vendor/contractor names via fuzzy matching (rapidfuzz)
-5. Convert entities into chunks (deduplicated via SHA256 hashes)
-6. Generate embeddings (dense + sparse vectors for hybrid search)
-7. Upload to Qdrant with hybrid search support (dense + sparse, RRF fusion)
-8. Export Excel + JSON files
+4. Filter out entities with all-empty attributes (no meaningful data)
+5. Resolve vendor/contractor names via fuzzy matching (rapidfuzz)
+6. Convert entities into chunks (deduplicated via SHA256 hashes)
+7. Generate embeddings (dense + sparse vectors for hybrid search)
+8. Upload to Qdrant with hybrid search support (dense + sparse, RRF fusion)
+9. Export Excel + JSON files
 
 ---
 

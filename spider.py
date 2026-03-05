@@ -38,12 +38,140 @@ from config import (
     PRIORITY_PATHS,
     OUTPUT_DIR,
     PDF_BUDGET_RATIO,
+    DOWNLOAD_ALL_PDFS,
+    ALLOWED_EXTERNAL_PDF_HOSTS,
     RESPECT_ROBOTS_TXT,
     USE_JS_RENDERING,
     RETRY_ATTEMPTS,
     RETRY_WAIT_MIN,
     RETRY_WAIT_MAX,
 )
+
+
+def _bare_domain(netloc: str) -> str:
+    """Strip optional 'www.' prefix so isd622.org == www.isd622.org."""
+    return netloc.lower().removeprefix("www.")
+
+
+def _same_domain(a: str, b: str) -> bool:
+    """Check two netlocs belong to the same domain (ignoring www.)."""
+    return _bare_domain(a) == _bare_domain(b)
+
+
+def _host_allowed_for_pdf(host: str, school_domain: str) -> bool:
+    """
+    Allow PDFs from same-domain host plus configured external host allowlist.
+    """
+    host = (host or "").lower()
+    if not host:
+        return False
+    if _same_domain(host, school_domain):
+        return True
+    for allowed in ALLOWED_EXTERNAL_PDF_HOSTS:
+        if host == allowed or host.endswith(f".{allowed}"):
+            return True
+    return False
+
+
+def _is_allowed_pdf_url(pdf_url: str, school_domain: str) -> bool:
+    """Basic URL sanity + host allowlist check for PDF links."""
+    try:
+        p = urlparse(pdf_url)
+    except Exception:
+        return False
+    if p.scheme not in ("http", "https"):
+        return False
+    if not p.netloc:
+        return False
+    return _host_allowed_for_pdf(p.netloc, school_domain)
+
+
+# ── Dynamic JS rendering detection ──────────────────────────────────────────────
+
+# Indicators that a page relies on client-side JS to render meaningful content.
+_JS_FRAMEWORK_MARKERS = [
+    "__NEXT_DATA__",       # Next.js
+    "__NUXT__",            # Nuxt / Vue SSR
+    "data-reactroot",      # React
+    'id="__next"',         # Next.js root
+    'id="root"></div>',    # CRA / Vite React
+    'id="app"></div>',     # Vue / generic SPA
+    "ng-app",              # AngularJS
+    "ng-version",          # Angular 2+
+    "window.__remixContext",  # Remix
+    "_ssgManifest",        # Next.js SSG
+    "data-turbo",          # Hotwire Turbo
+]
+
+# Minimum visible-text length (after stripping tags) to consider a
+# page "content-rich enough" without JS.
+_JS_DETECT_MIN_TEXT = 300
+
+
+def _get_response_text(resp) -> str:
+    """Extract HTML text from a Scrapling response, regardless of attribute name."""
+    for attr in ("content", "text", "html_content", "body"):
+        val = getattr(resp, attr, None)
+        if val:
+            return str(val) if isinstance(val, (str, bytes)) else val.decode("utf-8", errors="replace") if isinstance(val, (bytes, bytearray)) else str(val)
+    return ""
+
+
+def _detect_needs_js(url: str) -> bool:
+    """
+    Probe a URL with plain HTTP and decide whether JS rendering is needed.
+
+    Returns True when ANY of these hold:
+      1. The site returns 403/406/429 (bot-blocked) — needs a real browser
+      2. Visible text is very thin AND the HTML contains a JS-framework marker
+
+    Returns False when:
+      - The static page has enough content and no framework markers
+      - The probe fails entirely (default to static to avoid unnecessary browser)
+    """
+    try:
+        resp = Fetcher.get(url, stealthy_headers=True, timeout=12)
+        if not resp:
+            return False          # can't tell — stay with static
+
+        status = getattr(resp, "status", 0) or 0
+
+        # ── Bot-blocking status codes → almost certainly needs a real browser ──
+        if status in (403, 406, 429):
+            logger.info(
+                f"JS auto-detect: ENABLED for {urlparse(url).netloc} "
+                f"(static fetch returned HTTP {status} — likely bot-blocked)"
+            )
+            return True
+
+        if status != 200:
+            return False          # other errors — can't tell, stay static
+
+        raw_html = _get_response_text(resp)
+
+        # Strip tags to get rough visible text
+        visible = re.sub(r"<[^>]+>", " ", raw_html)
+        visible = re.sub(r"\s+", " ", visible).strip()
+
+        has_marker = any(m in raw_html for m in _JS_FRAMEWORK_MARKERS)
+        is_thin    = len(visible) < _JS_DETECT_MIN_TEXT
+
+        if is_thin and has_marker:
+            logger.info(
+                f"JS auto-detect: ENABLED for {urlparse(url).netloc} "
+                f"(visible text: {len(visible)} chars, framework marker found)"
+            )
+            return True
+
+        logger.info(
+            f"JS auto-detect: disabled for {urlparse(url).netloc} "
+            f"(visible text: {len(visible)} chars, marker={has_marker})"
+        )
+        return False
+
+    except Exception as exc:
+        logger.debug(f"JS auto-detect probe failed ({exc}) — defaulting to static")
+        return False
 
 
 # ── Retry-wrapped Fetcher ───────────────────────────────────────────────────────
@@ -54,23 +182,23 @@ from config import (
     retry=retry_if_exception_type((ConnectionError, TimeoutError, OSError)),
     reraise=True,
 )
-def _fetch_with_retry(url: str, timeout: int = 15):
+def _fetch_with_retry(url: str, timeout: int = 15, use_js: bool = False):
     """Fetch a URL with automatic retry on transient network errors.
 
-    When USE_JS_RENDERING is enabled, uses a **hybrid strategy**:
+    When use_js is True, uses a **hybrid strategy**:
       1. Try plain HTTP Fetcher first (fast)
       2. If the response body is very thin (<500 chars), fall back to
          StealthyFetcher (headless Chromium) to render JavaScript.
     This avoids launching a browser for pages that work fine statically,
     cutting JS rendering invocations by ~80% on typical school sites.
     """
-    if USE_JS_RENDERING:
+    if use_js:
         # --- Try static first ---
         try:
             resp = Fetcher.get(url, stealthy_headers=True, timeout=timeout)
             body_text = ""
-            if resp and resp.status == 200:
-                body_text = str(resp.content or "")
+            if resp and (getattr(resp, "status", 0) or 0) == 200:
+                body_text = _get_response_text(resp)
             if len(body_text.strip()) >= 500:
                 return resp          # static page has enough content
             logger.debug(f"Thin static response ({len(body_text)} chars), using JS: {url}")
@@ -106,18 +234,18 @@ class RobotsChecker:
 
     USER_AGENT = "*"  # our bot doesn't declare a specific UA
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, use_js: bool = False):
         parsed = urlparse(base_url)
         self._robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
         self._parser = RobotFileParser()
         self._loaded = False
         self._crawl_delay: Optional[float] = None
-        self._load()
+        self._load(use_js=use_js)
 
-    def _load(self):
+    def _load(self, use_js: bool = False):
         """Fetch and parse robots.txt. On failure, allow everything."""
         try:
-            resp = _fetch_with_retry(self._robots_url, timeout=10)
+            resp = _fetch_with_retry(self._robots_url, timeout=10, use_js=use_js)
             if resp and resp.status == 200:
                 content = str(resp.content or "")
                 lines = content.splitlines()
@@ -252,7 +380,7 @@ def _safe_pdf_filename(url: str) -> str:
 
 # ── Sitemap discovery ─────────────────────────────────────────────────────────
 
-def discover_sitemaps(base_url: str) -> list[str]:
+def discover_sitemaps(base_url: str, use_js: bool = False) -> list[str]:
     """
     Find all sitemap URLs for a website.
 
@@ -276,7 +404,7 @@ def discover_sitemaps(base_url: str) -> list[str]:
 
     for url in candidates:
         try:
-            page = _fetch_with_retry(url, timeout=10)
+            page = _fetch_with_retry(url, timeout=10, use_js=use_js)
             if page and page.status == 200:
                 content = str(page.content or "")
                 if "<urlset" in content or "<sitemapindex" in content:
@@ -289,7 +417,7 @@ def discover_sitemaps(base_url: str) -> list[str]:
     # Also check robots.txt for Sitemap: directives
     try:
         robots_url = f"{root_url}/robots.txt"
-        page = _fetch_with_retry(robots_url, timeout=10)
+        page = _fetch_with_retry(robots_url, timeout=10, use_js=use_js)
         if page and page.status == 200:
             for line in str(page.content or "").splitlines():
                 line = line.strip()
@@ -323,7 +451,7 @@ def _parse_priority(raw: Optional[str]) -> float:
         return 0.5
 
 
-def parse_sitemap(sitemap_url: str, domain: str, depth: int = 0) -> list[SitemapURL]:
+def parse_sitemap(sitemap_url: str, domain: str, depth: int = 0, use_js: bool = False) -> list[SitemapURL]:
     """
     Parse a sitemap XML and return all page URLs.
     Handles sitemap index files recursively (up to depth 2).
@@ -337,7 +465,7 @@ def parse_sitemap(sitemap_url: str, domain: str, depth: int = 0) -> list[Sitemap
     urls: list[SitemapURL] = []
 
     try:
-        page = _fetch_with_retry(sitemap_url, timeout=15)
+        page = _fetch_with_retry(sitemap_url, timeout=15, use_js=use_js)
         if not page or page.status != 200:
             logger.warning(f"Could not fetch sitemap: {sitemap_url} (status {getattr(page, 'status', 'N/A')})")
             return []
@@ -360,7 +488,7 @@ def parse_sitemap(sitemap_url: str, domain: str, depth: int = 0) -> list[Sitemap
             for sm in root.findall(".//sitemap"):
                 loc = (sm.findtext("loc") or "").strip()
                 if loc and urlparse(loc).netloc == domain:
-                    urls.extend(parse_sitemap(loc, domain, depth + 1))
+                    urls.extend(parse_sitemap(loc, domain, depth + 1, use_js=use_js))
 
         # ── Regular sitemap → extract page URLs ───────────────────────────
         else:
@@ -450,12 +578,18 @@ def select_pages(
     page_entries = sorted([e for e in scored if not e.is_pdf],
                           key=lambda e: e.relevance_score, reverse=True)
 
-    # Strict budget split
-    pdf_budget  = int(max_pages * PDF_BUDGET_RATIO)
-    page_budget = max_pages - pdf_budget
-
-    selected_pdfs  = pdf_entries[:pdf_budget]
-    selected_pages = [p for p in page_entries if p.relevance_score >= -5][:page_budget]
+    # Strict budget split unless configured to keep all PDFs.
+    if DOWNLOAD_ALL_PDFS:
+        selected_pdfs = pdf_entries
+        page_budget = max_pages
+        selected_pages = [p for p in page_entries if p.relevance_score >= -5][:page_budget]
+        pdf_budget_label = "ALL"
+    else:
+        pdf_budget = int(max_pages * PDF_BUDGET_RATIO)
+        page_budget = max_pages - pdf_budget
+        selected_pdfs = pdf_entries[:pdf_budget]
+        selected_pages = [p for p in page_entries if p.relevance_score >= -5][:page_budget]
+        pdf_budget_label = str(pdf_budget)
 
     # Log distribution
     high   = sum(1 for e in page_entries if e.relevance_score > 10)
@@ -467,8 +601,8 @@ def select_pages(
     )
     logger.info(
         f"Selected: {len(selected_pages)} pages (budget {page_budget}) + "
-        f"{len(selected_pdfs)} PDFs (budget {pdf_budget}) "
-        f"= {len(selected_pages) + len(selected_pdfs)} / {max_pages} total"
+        f"{len(selected_pdfs)} PDFs (budget {pdf_budget_label}) "
+        f"= {len(selected_pages) + len(selected_pdfs)} total"
     )
 
     top = sorted(selected_pages + selected_pdfs,
@@ -540,11 +674,13 @@ class SchoolSpider(Spider):
         selected_pdfs: list[str],     # PDF URLs from sitemap → direct download
         crawl_dir: Optional[str] = None,
         robots: Optional[RobotsChecker] = None,
+        use_js: bool = False,
     ):
         self.start_url   = start_url
         self.school_name = school_name
         self.domain      = urlparse(start_url).netloc
         self._robots     = robots
+        self._use_js     = use_js
 
         self._pages:     list[PageResult] = []
         self._pdfs:      list[PDFResult]  = []
@@ -587,6 +723,9 @@ class SchoolSpider(Spider):
         )
         for href in pdf_hrefs:
             pdf_url = urljoin(url, href)
+            if not _is_allowed_pdf_url(pdf_url, self.domain):
+                logger.debug(f"Skipped external/non-http PDF URL: {pdf_url}")
+                continue
             if pdf_url not in self._seen_urls:
                 # Respect robots.txt for dynamically discovered PDFs
                 if self._robots and not self._robots.can_fetch(pdf_url):
@@ -604,7 +743,7 @@ class SchoolSpider(Spider):
         try:
             content = response.body if hasattr(response, "body") else b""
             if not content:
-                raw     = _fetch_with_retry(pdf_url, timeout=20)
+                raw     = _fetch_with_retry(pdf_url, timeout=20, use_js=self._use_js)
                 content = raw.body if hasattr(raw, "body") else b""
 
             if content:
@@ -638,10 +777,13 @@ class SchoolSpider(Spider):
         # start_urls, we download sitemap PDFs directly via Fetcher before crawl.
         for pdf_url in self._sitemap_pdf_urls:
             try:
+                if not _is_allowed_pdf_url(pdf_url, self.domain):
+                    logger.debug(f"Skipped sitemap PDF from disallowed host: {pdf_url}")
+                    continue
                 # Respect Crawl-delay between sitemap PDF downloads
                 if self._robots:
                     time.sleep(self._robots.crawl_delay)
-                raw = _fetch_with_retry(pdf_url, timeout=20)
+                raw = _fetch_with_retry(pdf_url, timeout=20, use_js=self._use_js)
                 content = raw.body if hasattr(raw, "body") else b""
                 if content:
                     filename   = _safe_pdf_filename(pdf_url)
@@ -730,6 +872,9 @@ class FallbackSpider(Spider):
             + response.xpath("//a[contains(@href,'.pdf')]/@href").getall()
         ):
             pdf_url = urljoin(url, href)
+            if not _is_allowed_pdf_url(pdf_url, self.domain):
+                logger.debug(f"Skipped external/non-http PDF URL: {pdf_url}")
+                continue
             if pdf_url not in self._seen_urls:
                 if self._robots and not self._robots.can_fetch(pdf_url):
                     logger.debug(f"robots.txt blocked PDF: {pdf_url}")
@@ -746,7 +891,7 @@ class FallbackSpider(Spider):
             full = urljoin(url, href)
             p    = urlparse(full)
             if (p.scheme.startswith("http")
-                    and p.netloc == self.domain
+                    and _same_domain(p.netloc, self.domain)
                     and full not in self._seen_urls
                     and not p.path.endswith((".jpg", ".png", ".gif", ".css", ".js", ".xml"))):
                 # Respect robots.txt for discovered links
@@ -819,9 +964,18 @@ def crawl_school(
 
     domain = urlparse(url).netloc
 
+    # ── Resolve JS rendering mode ──────────────────────────────────────────────
+    use_js = False
+    if USE_JS_RENDERING == "auto":
+        use_js = _detect_needs_js(url)
+        logger.info(f"JS rendering: {'ON' if use_js else 'OFF'} (auto-detected)")
+    elif isinstance(USE_JS_RENDERING, bool):
+        use_js = USE_JS_RENDERING
+        logger.info(f"JS rendering: {'ON' if use_js else 'OFF'} (static config)")
+
     # ── Load robots.txt (skip if RESPECT_ROBOTS_TXT is False) ──────────────────
     if RESPECT_ROBOTS_TXT:
-        robots = RobotsChecker(url)
+        robots = RobotsChecker(url, use_js=use_js)
         logger.info(f"Effective crawl delay: {robots.crawl_delay}s")
     else:
         robots = None
@@ -829,13 +983,13 @@ def crawl_school(
 
     # ── Discover sitemaps ──────────────────────────────────────────────────────
     logger.info(f"Looking for sitemap: {domain}")
-    sitemap_urls = discover_sitemaps(url)
+    sitemap_urls = discover_sitemaps(url, use_js=use_js)
 
     if sitemap_urls:
         # ── Parse all sitemap URLs ─────────────────────────────────────────────
         all_entries: list[SitemapURL] = []
         for sm_url in sitemap_urls:
-            entries = parse_sitemap(sm_url, domain)
+            entries = parse_sitemap(sm_url, domain, use_js=use_js)
             all_entries.extend(entries)
 
         logger.info(f"Total sitemap URLs: {len(all_entries)}")
@@ -863,6 +1017,7 @@ def crawl_school(
                 selected_pdfs=[e.url for e in selected_pdfs],
                 crawl_dir=crawl_dir,
                 robots=robots,
+                use_js=use_js,
             )
             result = spider.run()
             result.sitemap_urls_found    = len(all_entries) + blocked

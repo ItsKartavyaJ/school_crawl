@@ -60,10 +60,11 @@ def _resolve_vendor_names(entities: list[ExtractedEntity]) -> list[ExtractedEnti
         # Try to find a matching cluster
         matched = False
         for cluster in clusters:
-            rep = cluster[0]
-            if fuzz.ratio(nl, rep.lower()) >= _FUZZY_THRESHOLD:
+            # FIX: Compare against the canonical (longest) name, not just first element
+            canonical = max(cluster, key=len)
+            if fuzz.ratio(nl, canonical.lower()) >= _FUZZY_THRESHOLD:
                 cluster.append(name)
-                canonical_map[nl] = cluster[0]  # will be resolved below
+                canonical_map[nl] = canonical  # will be resolved below
                 matched = True
                 break
         if not matched:

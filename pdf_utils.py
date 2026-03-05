@@ -151,3 +151,68 @@ def extract_pdf(path: str) -> Optional[PDFDocument]:
     except Exception as e:
         logger.error(f"pdfplumber also failed on {filename}: {e}")
         return None
+
+
+def extract_pdf_first_page(path: str) -> str:
+    """
+    Lightweight first-page extractor for PDF relevance filtering.
+
+    Returns extracted text from page 1 when possible; returns empty string on
+    failure. Tries pymupdf, then pdfplumber, then OCR for page 1 only.
+    """
+    path = str(path)
+    filename = Path(path).name
+
+    # Fast path: pymupdf page 1 text
+    try:
+        import fitz
+        doc = fitz.open(path)
+        if len(doc) > 0:
+            text = (doc[0].get_text("text") or "").strip()
+            doc.close()
+            if text:
+                return text
+        else:
+            doc.close()
+    except Exception:
+        pass
+
+    # Fallback: pdfplumber page 1 text
+    try:
+        import pdfplumber
+        with pdfplumber.open(path) as pdf:
+            if pdf.pages:
+                text = (pdf.pages[0].extract_text() or "").strip()
+                if text:
+                    return text
+    except Exception:
+        pass
+
+    # Final fallback: OCR first page only
+    try:
+        import fitz
+        from PIL import Image
+        import pytesseract
+        import io
+        import platform
+        import shutil
+
+        if platform.system() == "Windows":
+            default_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            if Path(default_path).exists():
+                pytesseract.pytesseract.tesseract_cmd = default_path
+        elif not shutil.which("tesseract"):
+            return ""
+
+        doc = fitz.open(path)
+        if len(doc) == 0:
+            doc.close()
+            return ""
+        pix = doc[0].get_pixmap(dpi=250)
+        doc.close()
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        text = (pytesseract.image_to_string(img) or "").strip()
+        return text
+    except Exception:
+        logger.debug(f"First-page extraction failed for {filename}")
+        return ""

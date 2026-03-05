@@ -90,21 +90,21 @@ The goal is to build a searchable database of school procurement data — who ar
 
 All settings loaded from `.env` via `python-dotenv`. Key settings:
 
-| Setting | Default | Purpose |
-|---|---|---|
-| `GEMINI_API_KEY` | — | API key for Gemini (extraction + optional embedding) |
-| `LANGEXTRACT_MODEL` | `gemini-2.5-flash` | LLM used for entity extraction |
-| `EMBEDDING_PROVIDER` | `gemini` | Choose: `gemini`, `openai`, `huggingface` |
-| `EMBEDDING_MODEL` | `text-embedding-004` | Embedding model (currently using `BAAI/bge-large-en-v1.5`) |
-| `QDRANT_URL` | — | Qdrant Cloud cluster URL |
-| `QDRANT_COLLECTION` | `school_intel` | Entity collection name |
-| `QDRANT_RAW_COLLECTION` | `school_intel_raw` | Raw text collection name |
-| `USE_JS_RENDERING` | `false` | Use headless browser (StealthyFetcher) instead of plain HTTP |
-| `RESPECT_ROBOTS_TXT` | `true` | Obey robots.txt rules (currently `false` in .env) |
-| `MAX_PAGES_PER_SCHOOL` | `100` | Max pages to crawl (currently `250` in .env) |
-| `PDF_BUDGET_RATIO` | `0.4` | Fraction of page budget for PDFs (currently `0.5`) |
-| `RAW_CHUNK_SIZE` | `1000` | Characters per raw text chunk |
-| `RAW_CHUNK_OVERLAP` | `200` | Overlap between raw text chunks |
+| Setting                 | Default              | Purpose                                                      |
+| ----------------------- | -------------------- | ------------------------------------------------------------ |
+| `GEMINI_API_KEY`        | —                    | API key for Gemini (extraction + optional embedding)         |
+| `LANGEXTRACT_MODEL`     | `gemini-2.5-flash`   | LLM used for entity extraction                               |
+| `EMBEDDING_PROVIDER`    | `gemini`             | Choose: `gemini`, `openai`, `huggingface`                    |
+| `EMBEDDING_MODEL`       | `text-embedding-004` | Embedding model (currently using `BAAI/bge-large-en-v1.5`)   |
+| `QDRANT_URL`            | —                    | Qdrant Cloud cluster URL                                     |
+| `QDRANT_COLLECTION`     | `school_intel`       | Entity collection name                                       |
+| `QDRANT_RAW_COLLECTION` | `school_intel_raw`   | Raw text collection name                                     |
+| `USE_JS_RENDERING`      | `false`              | Use headless browser (StealthyFetcher) instead of plain HTTP |
+| `RESPECT_ROBOTS_TXT`    | `true`               | Obey robots.txt rules (currently `false` in .env)            |
+| `MAX_PAGES_PER_SCHOOL`  | `100`                | Max pages to crawl (currently `250` in .env)                 |
+| `PDF_BUDGET_RATIO`      | `0.4`                | Fraction of page budget for PDFs (currently `0.5`)           |
+| `RAW_CHUNK_SIZE`        | `1000`               | Characters per raw text chunk                                |
+| `RAW_CHUNK_OVERLAP`     | `200`                | Overlap between raw text chunks                              |
 
 ---
 
@@ -113,6 +113,7 @@ All settings loaded from `.env` via `python-dotenv`. Key settings:
 The largest and most complex file. Two crawl strategies:
 
 **Strategy A: Sitemap-based (preferred)**
+
 1. Tries `/sitemap.xml`, `/sitemap_index.xml`, `/sitemap/`, and `robots.txt → Sitemap:` directives
 2. Parses all sitemap URLs, scores them for relevance using keyword matching
 3. Splits budget: PDFs get `PDF_BUDGET_RATIO` of slots, HTML pages get the rest
@@ -121,12 +122,14 @@ The largest and most complex file. Two crawl strategies:
 6. Also discovers and downloads any PDFs linked from crawled pages
 
 **Strategy B: Fallback link-following**
+
 - Used when no sitemap is found
 - Starts at homepage, follows same-domain links
 - Prioritizes links with high-value path keywords (`board`, `budget`, `vendor`, etc.)
 - Strict page budget enforced
 
 **Fetcher modes:**
+
 - `USE_JS_RENDERING=false` → `Fetcher.get()` — plain HTTP, fast, no JavaScript
 - `USE_JS_RENDERING=true` → **Hybrid static/JS strategy**:
   1. Tries `Fetcher.get()` first (fast, no browser)
@@ -134,12 +137,14 @@ The largest and most complex file. Two crawl strategies:
   3. This avoids launching a browser for pages that work fine statically, cutting JS rendering invocations by ~80% on typical school sites
 
 **Key classes:**
+
 - `RobotsChecker` — parses robots.txt, exposes `can_fetch()` and `crawl_delay`
 - `SchoolSpider(Spider)` — sitemap-based crawler
 - `FallbackSpider(Spider)` — link-following crawler
 - `crawl_school()` — public entry point, picks strategy automatically
 
 **URL scoring keywords:**
+
 - HIGH (+10): board, trustee, governance, budget, vendor, contractor, procurement, etc.
 - LOW (-8): news, blog, gallery, newsletter, login, cart, etc.
 - PDF bonus (+20 base, +5 per keyword): minutes, report, budget, contract, tender
@@ -151,6 +156,7 @@ The largest and most complex file. Two crawl strategies:
 Extracts text page-by-page from downloaded PDFs.
 
 **Extraction chain (tries in order):**
+
 1. **pymupdf (fitz)** — fastest, primary
 2. **pdfplumber** — fallback, with **table extraction**: `extract_tables()` converts structured tables to markdown format before raw text extraction, preserving tabular data (budget breakdowns, vendor lists, etc.)
 3. **Tesseract OCR** — for scanned/image-based PDFs. **Platform-aware**: uses `shutil.which("tesseract")` on Linux/Mac and falls back to `C:\Program Files\Tesseract-OCR\tesseract.exe` on Windows
@@ -165,16 +171,17 @@ Uses **LangExtract** library with **Gemini 2.5 Flash** to extract structured ent
 
 **Entity types extracted:**
 
-| Type | Key Attributes |
-|---|---|
-| `vendor` | vendor_name, service_type, contract_value, expiry_date, status |
-| `budget` | amount, currency, category, period, funding_source, status |
-| `project` | project_name, description, value, timeline, status, vendor |
-| `problem` | description, category, severity, date_mentioned, resolution |
-| `board_member` | name, role, term_start, term_end |
-| `contractor` | contractor_name, trade, project, contract_value, expiry_date |
+| Type           | Key Attributes                                                 |
+| -------------- | -------------------------------------------------------------- |
+| `vendor`       | vendor_name, service_type, contract_value, expiry_date, status |
+| `budget`       | amount, currency, category, period, funding_source, status     |
+| `project`      | project_name, description, value, timeline, status, vendor     |
+| `problem`      | description, category, severity, date_mentioned, resolution    |
+| `board_member` | name, role, term_start, term_end                               |
+| `contractor`   | contractor_name, trade, project, contract_value, expiry_date   |
 
 **Extraction prompt rules:**
+
 - Skip navigation, footers, cookie banners, "Powered by" credits
 - Only extract vendors with evidence the school actually uses/pays them
 - Require 2-4 sentence context in extraction_text
@@ -190,6 +197,7 @@ Extraction runs in parallel (4 workers via `ThreadPoolExecutor` in main.py).
 Converts `ExtractedEntity` objects into `Chunk` objects ready for embedding and upload.
 
 **For each entity, builds:**
+
 - `embed_text` — human-readable sentence (e.g. "Vendor: Google. Service: Google Workspace for Education. School: ACE Academy")
 - `metadata` — all filterable fields + source tracing
 - `chunk_id` — SHA256 hash of `school_name::type::source_url::source_page::text[:200]`
@@ -217,11 +225,11 @@ A second pass that preserves the **raw page text** (not just extracted entities)
 
 Three embedding providers:
 
-| Provider | Model | Dimensions | Notes |
-|---|---|---|---|
-| `huggingface` (current) | `BAAI/bge-large-en-v1.5` | 1024 | Free, local, GPU-accelerated |
-| `gemini` | `text-embedding-004` | 768 | Needs API key |
-| `openai` | `text-embedding-3-small` | 1536 | Needs API key |
+| Provider                | Model                    | Dimensions | Notes                        |
+| ----------------------- | ------------------------ | ---------- | ---------------------------- |
+| `huggingface` (current) | `BAAI/bge-large-en-v1.5` | 1024       | Free, local, GPU-accelerated |
+| `gemini`                | `text-embedding-004`     | 768        | Needs API key                |
+| `openai`                | `text-embedding-3-small` | 1536       | Needs API key                |
 
 BGE models automatically get the `"Represent this sentence: "` prefix for documents. Batched embedding with progress logging.
 
@@ -235,6 +243,7 @@ Alongside dense embeddings, `embed_chunks()` now also generates **sparse vectors
 Two uploaders:
 
 **`QdrantUploader`** — entity collection (`school_intel`)
+
 - Creates **hybrid collection** with named vectors:
   - `dense`: `VectorParams(size=dim, distance=COSINE)` — semantic similarity
   - `sparse`: `SparseVectorParams` — lexical/keyword matching
@@ -249,10 +258,12 @@ Two uploaders:
   - Falls back to dense-only if no sparse query vector is provided
 
 **`RawTextUploader(QdrantUploader)`** — raw text collection (`school_intel_raw`)
+
 - Same hybrid infrastructure (dense + sparse vectors), different collection
 - Payload: `{page_content: raw_text_window, metadata: {school_name, source_url, ...}}`
 
 Source tracing metadata for every point:
+
 ```
 source_url, source_type, source_domain, source_school_name,
 source_page, source_filename, source_is_pdf, source_crawled_at,
@@ -285,6 +296,7 @@ Embeds the query (both dense + sparse vectors), performs **hybrid search** via R
 ### `query_notebook.ipynb` — Jupyter notebook
 
 Interactive query interface with:
+
 - `search(query)` — entity collection search
 - `search_raw(query)` — raw text collection search
 - `ask(question)` — RAG: merges results from both collections, sends to Gemini for answer
@@ -315,18 +327,21 @@ python main.py --url https://... --no-qdrant
 Runs all 7 steps in sequence with **step-level resume** support.
 
 **Step-level state machine:**
+
 - Each pipeline run writes a JSON state file (`output/checkpoints/<school>_pipeline_state.json`) tracking which steps have completed
 - Use `--resume` flag to skip already-completed steps on re-run
 - Steps tracked: `crawl`, `extract`, `chunk`, `embed`, `upload`, `raw_upload`, `export`
 - If extraction fails at step 3, re-running with `--resume` skips the crawl and loads entities from checkpoint
 
 **Token budget estimation:**
+
 - Before dispatching extraction, estimates total tokens across all pages + PDFs (~chars / 4)
 - Logs the estimate and warns if > 900K tokens (high API cost risk)
 
 Also: saves checkpoints after extraction (JSON in `output/checkpoints/`). Supports batch processing from CSV (needs `url` column, optional `name`/`school_name` column). Reports per-stage timing at the end.
 
 **CLI flags:**
+
 ```bash
 python main.py --url <URL>           # required (or --csv)
 python main.py --name "School Name"   # optional
@@ -339,10 +354,10 @@ python main.py --resume               # skip completed steps
 
 ## Two Qdrant Collections
 
-| Collection | Purpose | Point Payload |
-|---|---|---|
-| `school_intel` | Structured entities (vendor, budget, etc.) | `{page_content: "Vendor: Google...", metadata: {type, school_name, vendor_name, ...}}` |
-| `school_intel_raw` | Raw page/PDF text windows | `{page_content: "The board approved...", metadata: {type: "raw_text", school_name, source_url, ...}}` |
+| Collection         | Purpose                                    | Point Payload                                                                                         |
+| ------------------ | ------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `school_intel`     | Structured entities (vendor, budget, etc.) | `{page_content: "Vendor: Google...", metadata: {type, school_name, vendor_name, ...}}`                |
+| `school_intel_raw` | Raw page/PDF text windows                  | `{page_content: "The board approved...", metadata: {type: "raw_text", school_name, source_url, ...}}` |
 
 The `ask()` function in the notebook queries **both** collections and merges results for RAG — entities give structured facts, raw text gives surrounding context.
 
@@ -390,9 +405,17 @@ Export: output/Aceacademycharter_20260303_120000.xlsx
 
 6. **SSL certificate errors with Fetcher** — `Fetcher.get()` (plain HTTP mode) sometimes fails with `curl: (60) SSL certificate problem` on certain environments/networks. StealthyFetcher doesn't have this issue since it uses a real browser.
 
-7. **No incremental / delta crawl** — Re-running the pipeline re-crawls everything from scratch. There's no way to only fetch pages that changed since the last run. Qdrant upsert prevents duplicate points, but all the crawl + extraction + embedding work is repeated. (Partially mitigated by `--resume` which skips completed pipeline steps.)
+7. ~~**Global JS mode race condition**~~ — ✅ FIXED: Removed module-level `_active_js_mode` global. `use_js` is now passed as a parameter through the entire call chain (`_fetch_with_retry`, `RobotsChecker`, `discover_sitemaps`, `parse_sitemap`, `SchoolSpider`, `crawl_school`). Each school gets its own JS detection result, no cross-school pollution when processing multiple schools.
 
-8. ~~**PDF extraction quality**~~ — ✅ FIXED: Tesseract path is now platform-aware (`shutil.which()` on Linux/Mac, default Windows path as fallback). OCR quality on low-resolution scans is still an inherent limitation.
+8. ~~**Double PDF extraction**~~ — ✅ FIXED: Added `_pdf_cache` dict with `_get_cached_pdf()` and `_clear_pdf_cache()` in `main.py`. PDFs are extracted once and cached for reuse across token budget estimation, entity extraction, and raw chunk building. Cache is cleared after raw upload step to free memory.
+
+9. ~~**Fuzzy clustering bug**~~ — ✅ FIXED: Entity resolution in `chunker.py` now compares new names against the canonical (longest) name in each cluster, not just the first element. This ensures proper clustering when the longest/most specific name isn't the first one added.
+
+10. ~~**Empty entities not filtered**~~ — ✅ FIXED: Added `_filter_empty_attributes()` in `extractor.py` to drop entities with all-empty attribute values. Called after confidence filter to remove noise entities that have no meaningful data.
+
+11. **No incremental / delta crawl** — Re-running the pipeline re-crawls everything from scratch. There's no way to only fetch pages that changed since the last run. Qdrant upsert prevents duplicate points, but all the crawl + extraction + embedding work is repeated. (Partially mitigated by `--resume` which skips completed pipeline steps.)
+
+12. ~~**PDF extraction quality**~~ — ✅ FIXED: Tesseract path is now platform-aware (`shutil.which()` on Linux/Mac, default Windows path as fallback). OCR quality on low-resolution scans is still an inherent limitation.
 
 ### Missing Features
 
@@ -420,14 +443,18 @@ Export: output/Aceacademycharter_20260303_120000.xlsx
 
 ## Recent Improvements (March 2026)
 
-| # | Improvement | Files Changed |
-|---|---|---|
-| 1 | **Hybrid search (dense + sparse)** — RRF fusion via Qdrant Prefetch | `embedder.py`, `uploader.py`, `query.py`, `chunker.py`, `raw_chunker.py` |
-| 2 | **robots.txt filter re-enabled** | `spider.py` |
-| 3 | **Platform-aware Tesseract** — `shutil.which()` + OS detection | `pdf_utils.py` |
-| 4 | **Hybrid JS/static fetcher** — try static first, JS only for thin pages | `spider.py` |
-| 5 | **Entity resolution** — `rapidfuzz` canonical vendor name matching | `chunker.py` |
-| 6 | **PDF table extraction** — `pdfplumber.extract_tables()` → markdown | `pdf_utils.py` |
-| 7 | **Token budget estimation** — warn before large extraction runs | `main.py` |
-| 8 | **Step-level resume** — `--resume` flag + JSON state machine | `main.py` |
-| 9 | **Confidence filter** — drop thin/noisy entities (< 3 unique tokens) | `extractor.py` |
+| #   | Improvement                                                             | Files Changed                                                            |
+| --- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 1   | **Hybrid search (dense + sparse)** — RRF fusion via Qdrant Prefetch     | `embedder.py`, `uploader.py`, `query.py`, `chunker.py`, `raw_chunker.py` |
+| 2   | **robots.txt filter re-enabled**                                        | `spider.py`                                                              |
+| 3   | **Platform-aware Tesseract** — `shutil.which()` + OS detection          | `pdf_utils.py`                                                           |
+| 4   | **Hybrid JS/static fetcher** — try static first, JS only for thin pages | `spider.py`                                                              |
+| 5   | **Entity resolution** — `rapidfuzz` canonical vendor name matching      | `chunker.py`                                                             |
+| 6   | **PDF table extraction** — `pdfplumber.extract_tables()` → markdown     | `pdf_utils.py`                                                           |
+| 7   | **Token budget estimation** — warn before large extraction runs         | `main.py`                                                                |
+| 8   | **Step-level resume** — `--resume` flag + JSON state machine            | `main.py`                                                                |
+| 9   | **Confidence filter** — drop thin/noisy entities (< 3 unique tokens)    | `extractor.py`                                                           |
+| 10 | **Empty attribute filter** — drop entities with all-empty attributes | `extractor.py` |
+| 11 | **PDF extraction caching** — cache PDF docs to avoid double extraction | `main.py` |
+| 12 | **Fuzzy clustering fix** — compare against canonical name, not first element | `chunker.py` |
+| 13 | **JS mode per-school** — pass use_js as parameter, remove global state | `spider.py` |

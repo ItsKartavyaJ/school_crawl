@@ -55,7 +55,7 @@ python query.py --list-schools
 
 See [arch.md](arch.md) for the full architecture doc — file-by-file breakdown, data flow, and known issues.
 
-**Pipeline:** Crawl → Extract (Gemini) → Confidence Filter → Entity Resolution (rapidfuzz) → Chunk → Embed (BGE-large dense + sparse) → Upload (Qdrant hybrid RRF) → Export (Excel/JSON)
+**Pipeline:** Crawl → Extract (Gemini) → Confidence Filter → Empty Attribute Filter → Entity Resolution (rapidfuzz) → Chunk → Embed (BGE-large dense + sparse) → Upload (Qdrant hybrid RRF) → Export (Excel/JSON)
 
 **Key features:**
 - Hybrid dense+sparse search via Qdrant RRF fusion
@@ -65,6 +65,8 @@ See [arch.md](arch.md) for the full architecture doc — file-by-file breakdown,
 - Step-level resume (`--resume` flag)
 - Token budget estimation before extraction
 - Confidence filter drops noise entities
+- Empty attribute filter drops entities with no meaningful data
+- PDF extraction caching (avoids double extraction)
 
 **Two Qdrant collections:**
 - `school_intel` — structured entities (vendors, budgets, projects, etc.)
